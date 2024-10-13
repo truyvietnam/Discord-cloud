@@ -25,3 +25,6 @@ Also you should create a new discord account, make a bot and get the bot and tha
 Those download links will be stored in ``uploads.json``
 
 You can open a browser and go to your localhost with port 5000 to download files
+
+# Showcase
+https://youtu.be/OH3OpkbIxHA
