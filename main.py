@@ -110,38 +110,63 @@ def delete_file(filename):
 @app.route('/upload', methods=['POST'])
 def upload_file():
     if 'file' not in request.files:
+        flash('No file part')
         return redirect(url_for('index'))
     
     file = request.files['file']
     if file.filename == '':
+        flash('No selected file')
         return redirect(url_for('index'))
     
     if file:
         filename = file.filename
-        file_size = request.content_length  # Use request.content_length instead of file.content_length
-        chunk_count = math.ceil(file_size / MAX_CHUNK_SIZE)
         chunk_links = []
+        chunk_number = 1
+        current_chunk = io.BytesIO()
+        current_chunk_size = 0
 
-        logging.info(f"Uploading file: {filename}, size: {file_size}, chunks: {chunk_count}")
+        logging.info(f"Starting upload for file: {filename}")
 
-        for i in range(chunk_count):
-            chunk = file.read(MAX_CHUNK_SIZE)
-            chunk_io = io.BytesIO(chunk)
-            chunk_io.seek(0)
-            
-            # Upload chunk to Discord using requests
-            chunk_link = upload_chunk_to_discord(chunk_io, f"{filename}.part{i+1}", i+1, chunk_count)
-            if chunk_link:
-                chunk_links.append(chunk_link)
-                logging.info(f"Uploaded chunk {i+1}/{chunk_count}: {chunk_link}")
-            else:
-                logging.error(f"Failed to upload chunk {i+1}/{chunk_count}")
-                return "Error uploading file chunk", 500
+        while True:
+            # Read 1MB at a time
+            chunk = file.read(1024 * 1024)
+            if not chunk:
+                # End of file
+                if current_chunk_size > 0:
+                    # Upload the last chunk if there's any data
+                    current_chunk.seek(0)
+                    chunk_link = upload_chunk_to_discord(current_chunk, f"{filename}.part{chunk_number}", chunk_number)
+                    if chunk_link:
+                        chunk_links.append(chunk_link)
+                        logging.info(f"Uploaded final chunk {chunk_number}: {chunk_link}")
+                    else:
+                        flash(f"Failed to upload final chunk {chunk_number}")
+                        return redirect(url_for('index'))
+                break
+
+            current_chunk.write(chunk)
+            current_chunk_size += len(chunk)
+
+            if current_chunk_size >= MAX_CHUNK_SIZE:
+                # Upload the current chunk
+                current_chunk.seek(0)
+                chunk_link = upload_chunk_to_discord(current_chunk, f"{filename}.part{chunk_number}", chunk_number)
+                if chunk_link:
+                    chunk_links.append(chunk_link)
+                    logging.info(f"Uploaded chunk {chunk_number}: {chunk_link}")
+                else:
+                    flash(f"Failed to upload chunk {chunk_number}")
+                    return redirect(url_for('index'))
+
+                # Reset for the next chunk
+                chunk_number += 1
+                current_chunk = io.BytesIO()
+                current_chunk_size = 0
 
         # Store file information in JSON
         upload_info = {
             "file_name": filename,
-            "total_chunks": chunk_count,
+            "total_chunks": chunk_number,
             "chunk_links": chunk_links
         }
 
@@ -162,11 +187,12 @@ def upload_file():
         with open(UPLOADS_FILE, 'w') as json_file:
             json.dump(uploads_data, json_file, indent=4)
 
+        flash(f"File '{filename}' uploaded successfully")
         logging.info(f"File information stored in {UPLOADS_FILE}")
 
         return redirect(url_for('index'))
 
-def upload_chunk_to_discord(file_data, filename, chunk_number, total_chunks):
+def upload_chunk_to_discord(file_data, filename, chunk_number):
     url = f"https://discord.com/api/v9/channels/{os.getenv('UPLOAD_CHANNEL_ID')}/messages"
     headers = {
         "Authorization": f"Bot {TOKEN}"
@@ -175,7 +201,7 @@ def upload_chunk_to_discord(file_data, filename, chunk_number, total_chunks):
         'file': (filename, file_data, 'application/octet-stream')
     }
     data = {
-        "content": f"Uploading chunk {chunk_number}/{total_chunks}"
+        "content": f"Uploading chunk {chunk_number}"
     }
     
     try:
