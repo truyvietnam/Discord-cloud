@@ -24,5 +24,5 @@ Those download links will be stored in ``uploads.json``
 
 You can open a browser and go to your localhost with port 5000 to download files, upload file and delete file (only remove from uploads.json)
 
-# Showcase
-https://youtu.be/OH3OpkbIxHA
+# Demo
+https://maple-road-dogwood.glitch.me/
