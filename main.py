@@ -1,20 +1,13 @@
-from flask import Flask, Response, abort, render_template_string, url_for
-import discord
+from flask import Flask, Response, abort, render_template, url_for, request, redirect, flash
 import os
 import requests
-from discord.ext import commands
 import math
 import json
-import threading
 import io
 from dotenv import load_dotenv
+import logging
 
 app = Flask(__name__)
-
-# Set up the bot
-intents = discord.Intents.default()
-intents.message_content = True
-bot = commands.Bot(command_prefix='!', intents=intents)
 
 load_dotenv()
 
@@ -37,6 +30,7 @@ def fetch_links(links):
     )
         return response.json()['refreshed_urls']
     else:
+        #for some reason I cannot get too much link refreshed so I just choose 40
         new_refreshed_links = []
         for i in range(0, len(converted_links), 40):
             response = requests.post(
@@ -73,67 +67,6 @@ def refresh_link(file: str):
     with open(UPLOADS_FILE, 'w') as json_file:
         json.dump(uploads_data, json_file, indent=4)
 
-@bot.event
-async def on_ready():
-    print(f'{bot.user} has connected to Discord!')
-
-@bot.command()
-async def upload(ctx, file_path: str):
-    try:
-        # Check if the file exists
-        if not os.path.exists(file_path):
-            await ctx.send("File not found. Please check the file path.")
-            return
-
-        file_size = os.path.getsize(file_path)
-        chunk_count = math.ceil(file_size / MAX_CHUNK_SIZE)
-        file_name = os.path.basename(file_path)
-
-        await ctx.send(f"Uploading file: {file_name}")
-        await ctx.send(f"File size: {file_size / (1024 * 1024):.2f} MB")
-        await ctx.send(f"Number of chunks: {chunk_count}")
-
-        chunk_links = []
-
-        with open(file_path, 'rb') as file:
-            for i in range(chunk_count):
-                chunk = file.read(MAX_CHUNK_SIZE)
-                chunk_io = io.BytesIO(chunk)
-                chunk_io.seek(0)
-                chunk_file = discord.File(fp=chunk_io, filename=f"{file_name}.part{i+1}")
-                message = await ctx.send(f"Uploading chunk {i+1}/{chunk_count}", file=chunk_file)
-                chunk_links.append(message.attachments[0].url)
-
-        await ctx.send("File upload complete!")
-
-        # Store file information in JSON
-        upload_info = {
-            "file_name": file_name,
-            "total_chunks": chunk_count,
-            "chunk_links": chunk_links
-        }
-
-        # Load existing data
-        try:
-            if os.path.exists(UPLOADS_FILE) and os.path.getsize(UPLOADS_FILE) > 0:
-                with open(UPLOADS_FILE, 'r') as json_file:
-                    uploads_data = json.load(json_file)
-            else:
-                uploads_data = {}
-        except json.JSONDecodeError:
-            uploads_data = {}
-
-        # Add new upload info
-        uploads_data[file_name] = upload_info
-
-        # Save updated data
-        with open(UPLOADS_FILE, 'w') as json_file:
-            json.dump(uploads_data, json_file, indent=4)
-
-        await ctx.send(f"File information stored in {UPLOADS_FILE}")
-
-    except Exception as e:
-        await ctx.send(f"An error occurred: {str(e)}")
 
 def stream_file(chunk_links):
     for link in chunk_links:
@@ -151,31 +84,107 @@ def index():
     except (FileNotFoundError, json.JSONDecodeError):
         uploads_data = {}
 
-    html = '''
-    <!DOCTYPE html>
-    <html>
-    <head>
-        <title>Available Files</title>
-        <style>
-            body { font-family: Arial, sans-serif; line-height: 1.6; padding: 20px; }
-            h1 { color: #333; }
-            ul { list-style-type: none; padding: 0; }
-            li { margin-bottom: 10px; }
-            a { color: #1a73e8; text-decoration: none; }
-            a:hover { text-decoration: underline; }
-        </style>
-    </head>
-    <body>
-        <h1>Available Files for Download</h1>
-        <ul>
-        {% for filename in files %}
-            <li><a href="{{ url_for('download_file', filename=filename) }}">{{ filename }}</a></li>
-        {% endfor %}
-        </ul>
-    </body>
-    </html>
-    '''
-    return render_template_string(html, files=uploads_data.keys())
+    return render_template('index.html', files=uploads_data.keys())
+
+@app.route('/delete/<filename>', methods=['POST'])
+def delete_file(filename):
+    try:
+        with open(UPLOADS_FILE, 'r') as json_file:
+            uploads_data = json.load(json_file)
+        
+        if filename in uploads_data:
+            del uploads_data[filename]
+            
+            with open(UPLOADS_FILE, 'w') as json_file:
+                json.dump(uploads_data, json_file, indent=4)
+            
+            flash(f"File '{filename}' has been deleted.")
+        else:
+            flash(f"File '{filename}' not found.")
+    
+    except Exception as e:
+        flash(f"An error occurred while deleting the file: {str(e)}")
+    
+    return redirect(url_for('index'))
+
+@app.route('/upload', methods=['POST'])
+def upload_file():
+    if 'file' not in request.files:
+        return redirect(url_for('index'))
+    
+    file = request.files['file']
+    if file.filename == '':
+        return redirect(url_for('index'))
+    
+    if file:
+        filename = file.filename
+        file_size = request.content_length  # Use request.content_length instead of file.content_length
+        chunk_count = math.ceil(file_size / MAX_CHUNK_SIZE)
+        chunk_links = []
+
+        logging.info(f"Uploading file: {filename}, size: {file_size}, chunks: {chunk_count}")
+
+        for i in range(chunk_count):
+            chunk = file.read(MAX_CHUNK_SIZE)
+            chunk_io = io.BytesIO(chunk)
+            chunk_io.seek(0)
+            
+            # Upload chunk to Discord using requests
+            chunk_link = upload_chunk_to_discord(chunk_io, f"{filename}.part{i+1}", i+1, chunk_count)
+            if chunk_link:
+                chunk_links.append(chunk_link)
+                logging.info(f"Uploaded chunk {i+1}/{chunk_count}: {chunk_link}")
+            else:
+                logging.error(f"Failed to upload chunk {i+1}/{chunk_count}")
+                return "Error uploading file chunk", 500
+
+        # Store file information in JSON
+        upload_info = {
+            "file_name": filename,
+            "total_chunks": chunk_count,
+            "chunk_links": chunk_links
+        }
+
+        # Load existing data
+        try:
+            if os.path.exists(UPLOADS_FILE) and os.path.getsize(UPLOADS_FILE) > 0:
+                with open(UPLOADS_FILE, 'r') as json_file:
+                    uploads_data = json.load(json_file)
+            else:
+                uploads_data = {}
+        except json.JSONDecodeError:
+            uploads_data = {}
+
+        # Add new upload info
+        uploads_data[filename] = upload_info
+
+        # Save updated data
+        with open(UPLOADS_FILE, 'w') as json_file:
+            json.dump(uploads_data, json_file, indent=4)
+
+        logging.info(f"File information stored in {UPLOADS_FILE}")
+
+        return redirect(url_for('index'))
+
+def upload_chunk_to_discord(file_data, filename, chunk_number, total_chunks):
+    url = f"https://discord.com/api/v9/channels/{os.getenv('UPLOAD_CHANNEL_ID')}/messages"
+    headers = {
+        "Authorization": f"Bot {TOKEN}"
+    }
+    files = {
+        'file': (filename, file_data, 'application/octet-stream')
+    }
+    data = {
+        "content": f"Uploading chunk {chunk_number}/{total_chunks}"
+    }
+    
+    try:
+        response = requests.post(url, headers=headers, files=files, data=data)
+        response.raise_for_status()  # Raise an exception for bad status codes
+        return response.json()['attachments'][0]['url']
+    except requests.RequestException as e:
+        logging.error(f"Error uploading chunk: {str(e)}")
+        return None
 
 @app.route('/download/<filename>')
 def download_file(filename):
@@ -205,15 +214,6 @@ def download_file(filename):
 def run_flask():
     app.run(debug=False, use_reloader=False)
 
-def run_bot():
-    bot.run(TOKEN)
-
 if __name__ == '__main__':
-    flask_thread = threading.Thread(target=run_flask)
-    bot_thread = threading.Thread(target=run_bot)
-
-    flask_thread.start()
-    bot_thread.start()
-
-    flask_thread.join()
-    bot_thread.join()
+    app.secret_key = '1234567890'  # Set a secret key for flash messages
+    run_flask()
